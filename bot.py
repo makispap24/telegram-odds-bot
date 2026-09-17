@@ -1,4 +1,4 @@
-import time
+import os
 import requests
 from datetime import datetime, timezone, timedelta
 import pytz
@@ -14,78 +14,87 @@ def fetch_and_filter_matches():
     start_of_today = now.replace(hour=0, minute=0, second=0, microsecond=0)
     end_of_window = (start_of_today + timedelta(days=1)).replace(hour=2, minute=0, second=0, microsecond=0)
 
-    LEAGUES = ["soccer", "epl", "champions-league", "europa-league", "la-liga", "serie-a", "bundesliga", "ligue-1", "super-league-greece"]
-    BOOKMAKERS = ["draftkings", "fanduel", "betmgm", "pinnacle"]
-
-    for bookmaker in BOOKMAKERS:
-        for league in LEAGUES:
-            url = f"https://api.oddsblaze.com/v2/odds/{bookmaker}/{league}.json"
-            params = {"key": ODDSBLAZE_KEY}
+    # Δοκιμή με το γενικό endpoint αποδόσεων του OddsBlaze για soccer
+    url = "https://api.oddsblaze.com/v1/odds"
+    params = {
+        "key": ODDSBLAZE_KEY,
+        "sport": "soccer"
+    }
+    
+    try:
+        response = requests.get(url, params=params, timeout=15)
+        if not response.ok:
+            print(f"API Error: {response.status_code} - {response.text}")
+            return []
             
-            try:
-                response = requests.get(url, params=params, timeout=10)
-                if not response.ok:
-                    continue
-                    
-                data = response.json()
-                events = data.get('events', data.get('games', []))
-                
-                for match in events:
-                    time_str = match.get('date', match.get('commence_time', ''))
-                    if not time_str:
-                        continue
-                        
-                    try:
-                        match_time_utc = datetime.strptime(time_str.split('.')[0].replace('Z', ''), '%Y-%m-%dT%H:%M:%S').replace(tzinfo=timezone.utc)
-                    except Exception:
-                        continue
-                        
-                    match_time_gr = match_time_utc.astimezone(greece_tz)
-                    
-                    if not (start_of_today <= match_time_gr <= end_of_window):
-                        continue
-                        
-                    teams = match.get('teams', {})
-                    home_team = teams.get('home', {}).get('name', match.get('home', ''))
-                    away_team = teams.get('away', {}).get('name', match.get('away', ''))
-                    
-                    odds_1 = odds_2 = over_25 = None
-                    markets = match.get('odds', match.get('markets', []))
-                    
-                    for market in markets:
-                        m_name = str(market.get('name', market.get('key', ''))).lower()
-                        if 'moneyline' in m_name or '1x2' in m_name or 'h2h' in m_name:
-                            for outcome in market.get('outcomes', []):
-                                name = outcome.get('name', '')
-                                price = outcome.get('price', outcome.get('odds', 0))
-                                if name == home_team: odds_1 = float(price)
-                                elif name == away_team: odds_2 = float(price)
-                        elif 'total' in m_name or 'goals' in m_name:
-                            for outcome in market.get('outcomes', []):
-                                name = outcome.get('name', '')
-                                point = outcome.get('point', outcome.get('line', 2.5))
-                                price = outcome.get('price', outcome.get('odds', 0))
-                                if 'over' in name.lower() and float(point) == 2.5:
-                                    over_25 = float(price)
-                    
-                    if odds_1 and odds_2 and over_25:
-                        if (odds_1 <= 1.60 or odds_2 <= 1.60) and over_25 <= 2.00:
-                            pick_type = "1" if odds_1 <= 1.60 else "2"
-                            pick_odd = odds_1 if odds_1 <= 1.60 else odds_2
-                            
-                            match_key = f"{home_team} - {away_team}"
-                            if not any(p['match'] == match_key for p in value_picks):
-                                value_picks.append({
-                                    "time": match_time_gr.strftime('%H:%M'),
-                                    "league": league.replace('-', ' ').title(),
-                                    "match": match_key,
-                                    "pick": pick_type,
-                                    "odd": pick_odd,
-                                    "over": over_25
-                                })
-            except Exception:
+        data = response.json()
+        matches = data if isinstance(data, list) else data.get('games', data.get('matches', data.get('events', [])))
+        print(f"Λήφθηκαν {len(matches)} συνολικά παιχνίδια.")
+        
+        for match in matches:
+            time_str = match.get('commence_time', match.get('date', match.get('time', '')))
+            if not time_str:
                 continue
                 
+            try:
+                if 'T' in str(time_str):
+                    match_time_utc = datetime.strptime(str(time_str).split('.')[0].replace('Z', ''), '%Y-%m-%dT%H:%M:%S').replace(tzinfo=timezone.utc)
+                else:
+                    match_time_utc = datetime.strptime(str(time_str), '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc)
+            except Exception:
+                continue
+                    
+            match_time_gr = match_time_utc.astimezone(greece_tz)
+            
+            if not (start_of_today <= match_time_gr <= end_of_window):
+                continue
+                
+            home_team = match.get('home_team', match.get('home', ''))
+            away_team = match.get('away_team', match.get('away', ''))
+            league_name = match.get('league', match.get('competition', 'Football'))
+            
+            odds_1 = odds_2 = over_25 = None
+            
+            bookmakers = match.get('bookmakers', match.get('odds', []))
+            for bm in bookmakers:
+                markets = bm.get('markets', bm.get('bets', []))
+                for market in markets:
+                    m_key = str(market.get('key', market.get('name', ''))).lower()
+                    
+                    if 'h2h' in m_key or 'moneyline' in m_key or '1x2' in m_key:
+                        for outcome in market.get('outcomes', []):
+                            name = outcome.get('name', '')
+                            price = outcome.get('price', outcome.get('odds', 0))
+                            if name == home_team: odds_1 = float(price)
+                            elif name == away_team: odds_2 = float(price)
+                            
+                    elif 'total' in m_key or 'goals' in m_key:
+                        for outcome in market.get('outcomes', []):
+                            name = outcome.get('name', '')
+                            point = outcome.get('point', outcome.get('line', 2.5))
+                            price = outcome.get('price', outcome.get('odds', 0))
+                            if 'over' in name.lower() and float(point) == 2.5:
+                                over_25 = float(price)
+                                
+                if odds_1 and odds_2 and over_25:
+                    break
+            
+            if odds_1 and odds_2 and over_25:
+                if (odds_1 <= 1.60 or odds_2 <= 1.60) and over_25 <= 2.00:
+                    pick_type = "1" if odds_1 <= 1.60 else "2"
+                    pick_odd = odds_1 if odds_1 <= 1.60 else odds_2
+                    
+                    value_picks.append({
+                        "time": match_time_gr.strftime('%H:%M'),
+                        "league": str(league_name).title(),
+                        "match": f"{home_team} - {away_team}",
+                        "pick": pick_type,
+                        "odd": pick_odd,
+                        "over": over_25
+                    })
+    except Exception as e:
+        print(f"Error fetching: {e}")
+        
     return value_picks
 
 def send_message(chat_id, text):
@@ -94,7 +103,7 @@ def send_message(chat_id, text):
     requests.post(url, json=payload)
 
 def run_bot():
-    print("Το Telegram Bot είναι ενεργό και περιμένει εντολές...")
+    print("Το Telegram Bot είναι ενεργό...")
     offset = 0
     while True:
         try:
@@ -111,7 +120,7 @@ def run_bot():
                     text = message.get("text", "").strip()
                     
                     if text.lower() in ["/picks", "/check", "ελεγχος", "picks"]:
-                        send_message(chat_id, "⏳ <b>Εκτελείται σάρωση αγορών...</b> Παρακαλώ περιμένετε μερικά δευτερόλεπτα.")
+                        send_message(chat_id, "⏳ <b>Εκτελείται σάρωση αγορών με OddsBlaze...</b>")
                         picks = fetch_and_filter_matches()
                         
                         if not picks:
@@ -124,9 +133,10 @@ def run_bot():
                         
                         send_message(chat_id, reply)
                     elif text.lower() in ["/start", "help"]:
-                        send_message(chat_id, "Γεια σου! Στείλε μου την εντολή <b>/picks</b> για να σαρώσω τα σημερινά παιχνίδια και να σου στείλω τα value picks άμεσα.")
+                        send_message(chat_id, "Στείλε <b>/picks</b> για άμεσο έλεγχο αποδόσεων.")
         except Exception as e:
-            print(f"Σφάλμα στο loop: {e}")
+            print(f"Error in loop: {e}")
+            import time
             time.sleep(5)
 
 if __name__ == "__main__":
