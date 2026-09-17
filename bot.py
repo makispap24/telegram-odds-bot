@@ -1,4 +1,6 @@
 import os
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 import requests
 from datetime import datetime, timezone, timedelta
 import pytz
@@ -6,6 +8,19 @@ import pytz
 TELEGRAM_TOKEN = "8993132236:AAGBisNWRqoesoNJzGRgjGRJY2le-h6ovVc"
 ODDSBLAZE_KEY = "1266751b-3116-41ac-bb96-89a93579b2c1"
 
+# 1. Ψεύτικος Web Server για να μην διαμαρτύρεται το Render
+class SimpleHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is alive and running!")
+
+def run_web_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(('0.0.0.0', port), SimpleHandler)
+    server.serve_forever()
+
+# 2. Η λογική για το OddsBlaze
 def fetch_and_filter_matches():
     value_picks = []
     greece_tz = pytz.timezone('Europe/Athens')
@@ -14,7 +29,6 @@ def fetch_and_filter_matches():
     start_of_today = now.replace(hour=0, minute=0, second=0, microsecond=0)
     end_of_window = (start_of_today + timedelta(days=1)).replace(hour=2, minute=0, second=0, microsecond=0)
 
-    # Δοκιμή με το γενικό endpoint αποδόσεων του OddsBlaze για soccer
     url = "https://api.oddsblaze.com/v1/odds"
     params = {
         "key": ODDSBLAZE_KEY,
@@ -24,12 +38,10 @@ def fetch_and_filter_matches():
     try:
         response = requests.get(url, params=params, timeout=15)
         if not response.ok:
-            print(f"API Error: {response.status_code} - {response.text}")
             return []
             
         data = response.json()
         matches = data if isinstance(data, list) else data.get('games', data.get('matches', data.get('events', [])))
-        print(f"Λήφθηκαν {len(matches)} συνολικά παιχνίδια.")
         
         for match in matches:
             time_str = match.get('commence_time', match.get('date', match.get('time', '')))
@@ -92,8 +104,8 @@ def fetch_and_filter_matches():
                         "odd": pick_odd,
                         "over": over_25
                     })
-    except Exception as e:
-        print(f"Error fetching: {e}")
+    except Exception:
+        pass
         
     return value_picks
 
@@ -102,8 +114,8 @@ def send_message(chat_id, text):
     payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
     requests.post(url, json=payload)
 
+# 3. Το Telegram Bot Polling
 def run_bot():
-    print("Το Telegram Bot είναι ενεργό...")
     offset = 0
     while True:
         try:
@@ -134,10 +146,14 @@ def run_bot():
                         send_message(chat_id, reply)
                     elif text.lower() in ["/start", "help"]:
                         send_message(chat_id, "Στείλε <b>/picks</b> για άμεσο έλεγχο αποδόσεων.")
-        except Exception as e:
-            print(f"Error in loop: {e}")
+        except Exception:
             import time
             time.sleep(5)
 
 if __name__ == "__main__":
+    # Ξεκινάει τον web server στο background για το Render
+    server_thread = threading.Thread(target=run_web_server, daemon=True)
+    server_thread.start()
+    
+    # Ξεκινάει το Telegram Bot
     run_bot()
